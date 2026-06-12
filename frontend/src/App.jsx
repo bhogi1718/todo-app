@@ -30,8 +30,11 @@ export default function App() {
   useEffect(() => {
     if (page !== 'todos' || !token) return;
     fetch(API, { headers: authHeaders(token) })
-      .then((r) => r.json())
-      .then((data) => Array.isArray(data) && setTodos(data));
+      .then((r) => {
+        if (r.status === 401) { logout(); return null; }
+        return r.json();
+      })
+      .then((data) => data && Array.isArray(data) && setTodos(data));
   }, [page]);
 
   // ── Auth ─────────────────────────────────────────────────────────────────────
