@@ -1,131 +1,133 @@
-import 'dotenv/config';   // loads .env file when running locally
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import mongoose from 'mongoose';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
 
 const app = express();
 const MONGO_URI = process.env.MONGO_URI;
 const PORT = process.env.PORT || 5000;
 const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
-
-console.log('MONGO_URI set:', !!MONGO_URI);
-console.log('MONGO_URI starts with:', MONGO_URI?.slice(0, 20));
+const JWT_SECRET = process.env.JWT_SECRET || 'devSecret123';
 
 if (!MONGO_URI) {
-  console.error('ERROR: MONGO_URI is not set. Add it in Render environment variables.');
+  console.error('ERROR: MONGO_URI is not set.');
   process.exit(1);
 }
 
-// ─── Middleware ────────────────────────────────────────────────────────────────
-
-// Allow the frontend to send requests to this server.
-// In production set CLIENT_URL in Render's environment variables.
 app.use(cors({ origin: CLIENT_URL }));
-
-// Lets us read JSON data from request bodies (req.body)
 app.use(express.json());
 
-// ─── Todo Model ────────────────────────────────────────────────────────────────
+const userSchema = new mongoose.Schema({
+  name:     { type: String, required: true, trim: true },
+  email:    { type: String, required: true, unique: true, lowercase: true },
+  password: { type: String, required: true },
+});
 
-// Define the shape of a todo document in MongoDB
 const todoSchema = new mongoose.Schema(
   {
-    text: {
-      type: String,     // todo text
-      required: true,   // cannot be empty
-      trim: true,       // removes extra spaces
-    },
-    completed: {
-      type: Boolean,    // true = done, false = not done
-      default: false,   // new todos start as not completed
-    },
+    text:      { type: String, required: true, trim: true },
+    completed: { type: Boolean, default: false },
+    userId:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   },
-  {
-    timestamps: true,   // auto-adds createdAt and updatedAt
-  }
+  { timestamps: true }
 );
 
-// Create the model — we use this to interact with the "todos" collection in MongoDB
+const User = mongoose.model('User', userSchema);
 const Todo = mongoose.model('Todo', todoSchema);
 
-// ─── Routes ────────────────────────────────────────────────────────────────────
+function auth(req, res, next) {
+  const header = req.headers.authorization;
+  if (!header) return res.status(401).json({ error: 'No token' });
+  const token = header.split(' ')[1];
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+}
 
-// GET /api/todos — fetch all todos (newest first)
-app.get('/api/todos', async (req, res) => {
-  const todos = await Todo.find().sort({ createdAt: -1 });
+app.post('/api/auth/register', async (req, res) => {
+  const { name, email, password } = req.body;
+  if (!name || !email || !password)
+    return res.status(400).json({ error: 'All fields are required' });
+
+  const exists = await User.findOne({ email });
+  if (exists) return res.status(400).json({ error: 'Email already registered' });
+
+  const hashed = await bcrypt.hash(password, 10);
+  const user = await User.create({ name, email, password: hashed });
+  const token = jwt.sign({ id: user._id, name: user.name }, JWT_SECRET, { expiresIn: '7d' });
+  res.status(201).json({ token, name: user.name });
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password)
+    return res.status(400).json({ error: 'All fields are required' });
+
+  const user = await User.findOne({ email });
+  if (!user) return res.status(400).json({ error: 'Invalid email or password' });
+
+  const match = await bcrypt.compare(password, user.password);
+  if (!match) return res.status(400).json({ error: 'Invalid email or password' });
+
+  const token = jwt.sign({ id: user._id, name: user.name }, JWT_SECRET, { expiresIn: '7d' });
+  res.json({ token, name: user.name });
+});
+
+app.get('/api/todos', auth, async (req, res) => {
+  const todos = await Todo.find({ userId: req.user.id }).sort({ createdAt: -1 });
   res.json(todos);
 });
 
-// POST /api/todos — create a new todo
-// Frontend sends: { text: "buy milk" }
-app.post('/api/todos', async (req, res) => {
+app.post('/api/todos', auth, async (req, res) => {
   const { text } = req.body;
-
-  if (!text || !text.trim()) {
+  if (!text || !text.trim())
     return res.status(400).json({ error: 'Text is required' });
-  }
 
-  const todo = await Todo.create({ text: text.trim() });
-  res.status(201).json(todo); // 201 = Created
+  const todo = await Todo.create({ text: text.trim(), userId: req.user.id });
+  res.status(201).json(todo);
 });
 
-// PATCH /api/todos/:id — update the text of a todo
-// Frontend sends: { text: "updated task" }
-app.patch('/api/todos/:id', async (req, res) => {
+app.patch('/api/todos/:id', auth, async (req, res) => {
   const { text } = req.body;
-
-  if (!text || !text.trim()) {
+  if (!text || !text.trim())
     return res.status(400).json({ error: 'Text is required' });
-  }
 
-  const todo = await Todo.findByIdAndUpdate(
-    req.params.id,
+  const todo = await Todo.findOneAndUpdate(
+    { _id: req.params.id, userId: req.user.id },
     { text: text.trim() },
-    { new: true }  // return the updated document
+    { new: true }
   );
-
-  if (!todo) {
-    return res.status(404).json({ error: 'Todo not found' });
-  }
-
+  if (!todo) return res.status(404).json({ error: 'Todo not found' });
   res.json(todo);
 });
 
-// PUT /api/todos/:id — toggle a todo's completed status (done ↔ not done)
-app.put('/api/todos/:id', async (req, res) => {
-  const todo = await Todo.findById(req.params.id);
+app.put('/api/todos/:id', auth, async (req, res) => {
+  const todo = await Todo.findOne({ _id: req.params.id, userId: req.user.id });
+  if (!todo) return res.status(404).json({ error: 'Todo not found' });
 
-  if (!todo) {
-    return res.status(404).json({ error: 'Todo not found' });
-  }
-
-  todo.completed = !todo.completed; // flip true → false or false → true
+  todo.completed = !todo.completed;
   await todo.save();
   res.json(todo);
 });
 
-// DELETE /api/todos/:id — delete a todo permanently
-app.delete('/api/todos/:id', async (req, res) => {
-  const todo = await Todo.findByIdAndDelete(req.params.id);
-
-  if (!todo) {
-    return res.status(404).json({ error: 'Todo not found' });
-  }
-
+app.delete('/api/todos/:id', auth, async (req, res) => {
+  const todo = await Todo.findOneAndDelete({ _id: req.params.id, userId: req.user.id });
+  if (!todo) return res.status(404).json({ error: 'Todo not found' });
   res.json({ message: 'Deleted successfully' });
 });
-
-// ─── Connect to MongoDB, then start the server ─────────────────────────────────
 
 mongoose
   .connect(MONGO_URI)
   .then(() => {
     console.log('Connected to MongoDB');
-    app.listen(PORT, () => {
-      console.log(`Server running at http://localhost:${PORT}`);
-    });
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
   })
-  .catch((error) => {
-    console.error('Failed to connect to MongoDB:', error.message);
+  .catch((err) => {
+    console.error('Failed to connect to MongoDB:', err.message);
     process.exit(1);
   });
