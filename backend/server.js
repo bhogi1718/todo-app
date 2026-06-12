@@ -1,16 +1,26 @@
+import 'dotenv/config';   // loads .env file when running locally
 import express from 'express';
 import cors from 'cors';
 import mongoose from 'mongoose';
 
 const app = express();
+const MONGO_URI = process.env.MONGO_URI;
+const PORT = process.env.PORT || 5000;
+const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
 
-const PORT = 5000;
-const MONGO_URI = 'mongodb://localhost:27017/todoapp';
+console.log('MONGO_URI set:', !!MONGO_URI);
+console.log('MONGO_URI starts with:', MONGO_URI?.slice(0, 20));
+
+if (!MONGO_URI) {
+  console.error('ERROR: MONGO_URI is not set. Add it in Render environment variables.');
+  process.exit(1);
+}
 
 // ─── Middleware ────────────────────────────────────────────────────────────────
 
-// Allow the React frontend (port 5173) to send requests to this server
-app.use(cors({ origin: 'http://localhost:5173' }));
+// Allow the frontend to send requests to this server.
+// In production set CLIENT_URL in Render's environment variables.
+app.use(cors({ origin: CLIENT_URL }));
 
 // Lets us read JSON data from request bodies (req.body)
 app.use(express.json());

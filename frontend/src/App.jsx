@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 
-const API = '/api/todos';
+const API = `${import.meta.env.VITE_API_URL}/api/todos`;
 
 export default function App() {
   const [text, setText] = useState('');         // input box value
